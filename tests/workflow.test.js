@@ -180,3 +180,14 @@ test('pickup reminder is sent once within the reminder window', async () => {
   assert.equal(d.status, 'not_configured', 'undelivered WhatsApp is never recorded as delivered');
   run('SELECT 1');
 });
+
+test('management and app portals are separate', async () => {
+  const mgmtAsCustomer = await call(null, 'POST', '/auth/login', { email: 'customer@encore.test', password: DEMO_PASSWORD, portal: 'management' });
+  assert.equal(mgmtAsCustomer.status, 403, 'customers cannot use the Command Center');
+  const mgmtAsDriver = await call(null, 'POST', '/auth/login', { email: 'james@encore.test', password: DEMO_PASSWORD, portal: 'management' });
+  assert.equal(mgmtAsDriver.status, 403, 'drivers cannot use the Command Center');
+  const appAsAdmin = await call(null, 'POST', '/auth/login', { email: 'admin@encore.test', password: DEMO_PASSWORD, portal: 'app' });
+  assert.equal(appAsAdmin.status, 403, 'management cannot sign into the app');
+  const mgmtAsAdmin = await call(null, 'POST', '/auth/login', { email: 'admin@encore.test', password: DEMO_PASSWORD, portal: 'management' });
+  assert.equal(mgmtAsAdmin.status, 200);
+});

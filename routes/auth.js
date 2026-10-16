@@ -39,7 +39,11 @@ r.post('/login', h((req, res) => {
   const user = get('SELECT * FROM users WHERE email = ?', String(email || '').trim());
   if (!user || !checkPassword(String(password || ''), user.password_hash)) throw new HttpError(401, 'Email or password is incorrect.');
   if (user.status !== 'active') throw new HttpError(403, accountStatusMessage(user.status));
-  audit({ entity: 'user', entityId: user.id, action: 'signed_in', actorId: user.id });
+  // Management uses the separate Command Center web app; customers and chauffeurs use the Encore app.
+  const portal = req.body?.portal;
+  if (portal === 'management' && user.role !== 'admin') throw new HttpError(403, 'This portal is for Encore management only. Customers and chauffeurs please use the Encore app.');
+  if (portal === 'app' && user.role === 'admin') throw new HttpError(403, 'Management accounts sign in at the Encore Command Center, not the app.');
+  audit({ entity: 'user', entityId: user.id, action: 'signed_in', detail: portal ? { portal } : null, actorId: user.id });
   res.json({ token: signToken(user), user: publicUser(user) });
 }));
 

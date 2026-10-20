@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Encore Executive API — bookings, quotations, dispatch, payments, notifications",
+  "description": "Encore Executive API - bookings, quotations, dispatch, payments, notifications",
   "main": "index.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env --env-file-if-exists=../.env index.js",
@@ -11,7 +11,9 @@
     "seed": "node seed.js --reset",
     "test": "node --test tests/*.test.js"
   },
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": "24.x"
+  },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "express": "^4.21.2",

@@ -8,7 +8,7 @@ const DB_FILE = process.env.ENCORE_DB_FILE || path.join(DATA_DIR, 'encore.db');
 if (DB_FILE !== ':memory:') fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 
 export const db = new DatabaseSync(DB_FILE);
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+db.exec(`PRAGMA journal_mode = ${process.env.ENCORE_JOURNAL || 'WAL'}; PRAGMA foreign_keys = ON;`);
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS organisations (

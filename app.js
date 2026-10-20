@@ -18,6 +18,19 @@ export function createApp() {
     next();
   });
 
+  // The Capacitor mobile app serves its bundled pages from these origins and calls the API cross-origin.
+  const appOrigins = new Set(['https://localhost', 'capacitor://localhost', 'http://localhost']);
+  app.use('/api', (req, res, next) => {
+    if (!appOrigins.has(req.get('Origin'))) return next();
+    res.set('Access-Control-Allow-Origin', req.get('Origin'));
+    res.set('Vary', 'Origin');
+    if (req.method !== 'OPTIONS') return next();
+    res.set('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Access-Control-Max-Age', '600');
+    res.sendStatus(204);
+  });
+
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
   app.use('/api/auth', authRoutes);
   app.use('/api/bookings', authenticate, bookingRoutes);

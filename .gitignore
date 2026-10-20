@@ -10,3 +10,7 @@ node_modules
 
 # Local test databases
 /api/*.db
+.vercel
+
+.vercel
+.env*

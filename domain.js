@@ -134,6 +134,7 @@ function customerLeg(l) {
   return {
     id: l.id, leg_no: l.leg_no, label: l.label, pickup: l.pickup, destination: l.destination, stops: l.stops,
     pickup_at: l.pickup_at, status: l.status, distance_m: l.distance_m, duration_s: l.duration_s,
+    driver_accepted_at: assigned ? l.driver_accepted_at : null,
     vehicle: assigned ? (l.vehicle_registration
       ? { registration: l.vehicle_registration, make: l.vehicle_make, model: l.vehicle_model, colour: l.vehicle_colour }
       : l.external_vehicle_reg ? { registration: l.external_vehicle_reg } : null) : null,
@@ -146,6 +147,7 @@ function driverLeg(l) {
   return {
     id: l.id, leg_no: l.leg_no, label: l.label, pickup: l.pickup, destination: l.destination, stops: l.stops,
     pickup_at: l.pickup_at, est_minutes: l.est_minutes, status: l.status, distance_m: l.distance_m, duration_s: l.duration_s,
+    driver_accepted_at: l.driver_accepted_at,
     vehicle: l.vehicle_registration ? { registration: l.vehicle_registration, make: l.vehicle_make, model: l.vehicle_model, colour: l.vehicle_colour } : null,
     navigation_url: navigationUrl(l),
     on_the_way_at: l.on_the_way_at, arrived_at: l.arrived_at, started_at: l.started_at, completed_at: l.completed_at,

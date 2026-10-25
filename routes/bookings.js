@@ -429,7 +429,7 @@ r.post('/:id/legs/:legId/assign', adminOnly, h((req, res) => {
 
   const previousDriver = leg.driver_id;
   tx(() => {
-    update('booking_legs', leg.id, { ...patch, status: DELIVERY.includes(leg.status) ? leg.status : 'assigned' });
+    update('booking_legs', leg.id, { ...patch, status: DELIVERY.includes(leg.status) ? leg.status : 'assigned', driver_accepted_at: patch.driver_id && patch.driver_id === previousDriver ? leg.driver_accepted_at : null });
     audit({
       bookingId: b.id, entity: 'leg', entityId: leg.id, action: leg.status === 'unassigned' ? 'assigned' : 'reassigned',
       detail: { leg: leg.label, ...patch, previous_driver_id: previousDriver, previous_vehicle_id: leg.vehicle_id }, actorId: req.user.id,
@@ -458,12 +458,42 @@ r.post('/:id/legs/:legId/unassign', adminOnly, h((req, res) => {
   const leg = get('SELECT * FROM booking_legs WHERE id = ? AND booking_id = ?', req.params.legId, b.id);
   if (!leg || leg.status !== 'assigned') throw conflict('Only an assigned leg that has not started can be unassigned.');
   tx(() => {
-    update('booking_legs', leg.id, { driver_id: null, vehicle_id: null, external_operator_id: null, external_vehicle_reg: null, external_driver_name: null, status: 'unassigned', conflict_override_reason: null });
+    update('booking_legs', leg.id, { driver_id: null, vehicle_id: null, external_operator_id: null, external_vehicle_reg: null, external_driver_name: null, status: 'unassigned', conflict_override_reason: null, driver_accepted_at: null });
     audit({ bookingId: b.id, entity: 'leg', entityId: leg.id, action: 'unassigned', detail: { leg: leg.label, driver_id: leg.driver_id, vehicle_id: leg.vehicle_id }, actorId: req.user.id });
     deriveDeliveryStatus(b.id);
   });
   if (leg.driver_id) notify(leg.driver_id, { bookingId: b.id, event: 'job_unassigned', title: `Assignment removed · ${b.ref}`, body: `${leg.label} on ${fmtWhen(leg.pickup_at)} has been removed from your schedule.` });
   res.json(bookingView(b.id, req.user));
+}));
+
+// ---------- driver accepts or declines an assignment ----------
+r.post('/:id/legs/:legId/respond', h((req, res) => {
+  const u = req.user;
+  const b = loadBookingRow(Number(req.params.id), u);
+  const leg = legsFor(b.id).find((l) => l.id === Number(req.params.legId));
+  if (!leg) throw bad('Unknown leg.');
+  if (u.role !== 'driver' || leg.driver_id !== u.id) throw forbidden('You can only respond to journeys assigned to you.');
+  if (leg.status !== 'assigned') throw conflict('This journey is already under way.');
+  const accept = req.body.accept === true;
+  if (accept) {
+    if (leg.driver_accepted_at) return res.json(bookingView(b.id, u));
+    tx(() => {
+      update('booking_legs', leg.id, { driver_accepted_at: new Date().toISOString() });
+      audit({ bookingId: b.id, entity: 'leg', entityId: leg.id, action: 'driver_accepted', detail: { leg: leg.label }, actorId: u.id });
+    });
+    notify(b.customer_id, { bookingId: b.id, event: 'driver_accepted', title: `Your chauffeur is confirmed · ${b.ref}`, body: `${u.name.split(' ')[0]} will drive you on ${fmtWhen(leg.pickup_at)}.` });
+    notifyAdmins({ bookingId: b.id, event: 'driver_accepted', title: `${u.name} accepted ${b.ref}`, body: `${leg.label} · ${fmtWhen(leg.pickup_at)}.` });
+  } else {
+    const reason = String(req.body.reason || '').trim();
+    tx(() => {
+      update('booking_legs', leg.id, { driver_id: null, vehicle_id: null, status: 'unassigned', driver_accepted_at: null, conflict_override_reason: null });
+      audit({ bookingId: b.id, entity: 'leg', entityId: leg.id, action: 'driver_declined', detail: { leg: leg.label, reason: reason || null }, actorId: u.id });
+      deriveDeliveryStatus(b.id);
+    });
+    notifyAdmins({ bookingId: b.id, event: 'driver_declined', title: `${u.name} declined ${b.ref} — reassign`, body: `${leg.label} · ${fmtWhen(leg.pickup_at)}${reason ? `. Reason: ${reason}` : ''}.` });
+    return res.json({ declined: true });
+  }
+  res.json(bookingView(b.id, u));
 }));
 
 // ---------- journey status (DRV-2) ----------
@@ -502,6 +532,7 @@ r.post('/:id/legs/:legId/status', h((req, res) => {
 
   tx(() => {
     const patch = { status: target };
+    if (!leg.driver_accepted_at && to > from) patch.driver_accepted_at = new Date().toISOString();
     if (LEG_TIMESTAMP[target]) patch[LEG_TIMESTAMP[target]] = new Date().toISOString();
     // When moving backwards, clear later timestamps so history stays truthful.
     for (const s of LEG_FLOW.slice(to + 1)) if (LEG_TIMESTAMP[s]) patch[LEG_TIMESTAMP[s]] = null;
@@ -514,6 +545,7 @@ r.post('/:id/legs/:legId/status', h((req, res) => {
   if (msg && to > from) {
     const fresh = legsFor(b.id).find((l) => l.id === leg.id);
     notify(b.customer_id, { bookingId: b.id, event: msg[0], title: `${msg[1]} · ${b.ref}`, body: msg[2](fresh) });
+    if (!adminOverride) notifyAdmins({ bookingId: b.id, event: msg[0], title: `${b.ref} · ${target.replace(/_/g, ' ')}`, body: `${fresh.driver_name || 'Chauffeur'} — ${fresh.label}.` });
   }
   res.json({ unchanged: false, booking: bookingView(b.id, u) });
 }));

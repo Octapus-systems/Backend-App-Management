@@ -191,3 +191,30 @@ test('management and app portals are separate', async () => {
   const mgmtAsAdmin = await call(null, 'POST', '/auth/login', { email: 'admin@encore.test', password: DEMO_PASSWORD, portal: 'management' });
   assert.equal(mgmtAsAdmin.status, 200);
 });
+
+test('driver accepts or declines an assignment; everyone is told', async () => {
+  let r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(200) }));
+  const id = r.body.id;
+  r = await call('admin', 'POST', `/bookings/${id}/confirm`, { override_reason: 'Agreed by phone' });
+  assert.equal(r.body.status, 'confirmed');
+  assert.ok(get("SELECT 1 FROM notifications WHERE booking_id = ? AND event = 'booking_confirmed'", id), 'customer told of confirmation');
+  const leg = r.body.legs[0];
+  const assign = { driver_id: get("SELECT id FROM users WHERE email='james@encore.test'").id, vehicle_id: get("SELECT id FROM vehicles WHERE registration='EN23 EXE'").id };
+
+  r = await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/assign`, assign);
+  assert.equal(r.status, 200);
+  r = await call('oliver', 'POST', `/bookings/${id}/legs/${leg.id}/respond`, { accept: true });
+  assert.equal(r.status, 403, 'only the assigned driver can respond');
+
+  r = await call('james', 'POST', `/bookings/${id}/legs/${leg.id}/respond`, { accept: false, reason: 'Clash' });
+  assert.equal(r.status, 200);
+  assert.equal(get('SELECT status FROM bookings WHERE id = ?', id).status, 'confirmed', 'declined leg goes back to unassigned');
+  assert.ok(get("SELECT 1 FROM notifications WHERE booking_id = ? AND event = 'driver_declined'", id), 'management told of decline');
+
+  await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/assign`, assign);
+  r = await call('james', 'POST', `/bookings/${id}/legs/${leg.id}/respond`, { accept: true });
+  assert.equal(r.status, 200);
+  r = await call('cust', 'GET', `/bookings/${id}`);
+  assert.ok(r.body.legs[0].driver_accepted_at, 'customer sees chauffeur confirmed');
+  assert.ok(get("SELECT 1 FROM notifications WHERE booking_id = ? AND event = 'driver_accepted'", id));
+});

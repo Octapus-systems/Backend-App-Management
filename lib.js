@@ -40,11 +40,16 @@ export const randomToken = () => crypto.randomBytes(24).toString('base64url');
 export function publicUser(u) {
   if (!u) return null;
   const { password_hash: _ph, ...rest } = u;
+  if (String(rest.email).endsWith('@phone.encore.invalid')) rest.email = null; // signed up with mobile only
   if (rest.organisation_id) {
     rest.organisation = get('SELECT id, name, payment_terms FROM organisations WHERE id = ?', rest.organisation_id) || null;
   }
   return rest;
 }
+
+export const ACCESS_EXPIRED = 'Your temporary chauffeur access has ended. Please contact Encore dispatch.';
+/** Temporary drivers lose access after their end date. */
+export const accessExpired = (u) => !!u.access_expires_at && new Date(u.access_expires_at).getTime() < Date.now();
 
 export function authenticate(req, _res, next) {
   const header = req.headers.authorization || '';
@@ -55,6 +60,7 @@ export function authenticate(req, _res, next) {
     const user = get('SELECT * FROM users WHERE id = ?', payload.sub);
     if (!user) return next(new HttpError(401, 'Account not found.'));
     if (user.status !== 'active') return next(new HttpError(403, accountStatusMessage(user.status)));
+    if (accessExpired(user)) return next(new HttpError(403, ACCESS_EXPIRED));
     req.user = user;
     next();
   } catch {

@@ -77,6 +77,24 @@ export function agreedTotal(bookingId) {
 }
 
 /** Full booking view, filtered to what the viewer may see. */
+/** Payment rule (Settings → payment_rule): pay-before bookings must be paid before assignment or the journey starts. */
+export function paymentOutstanding(b) {
+  return b.payment_arrangement === 'pay_before' && b.payment_status !== 'paid';
+}
+export function paymentBlocks(b, stage) {
+  const rule = setting('payment_rule');
+  if (rule === 'off' || !paymentOutstanding(b)) return false;
+  if (stage === 'assignment') return rule === 'before_assignment';
+  return rule === 'before_assignment' || rule === 'before_start';
+}
+
+/** Earliest time the chauffeur may press the first journey step (Settings → start_window_minutes). */
+export function startAvailableAt(leg) {
+  const mins = Number(setting('start_window_minutes') || 0);
+  if (!mins) return null;
+  return new Date(new Date(leg.pickup_at).getTime() - mins * 60000).toISOString();
+}
+
 export function bookingView(id, user) {
   const b = loadBookingRow(id, user);
   const legs = legsFor(id);
@@ -94,7 +112,8 @@ export function bookingView(id, user) {
       special_instructions: b.special_instructions, sensitive_notes: b.sensitive_notes,
       flight_number: b.flight_number, duration_hours: b.duration_hours,
       cancelled: TERMINAL.includes(b.status) && b.status.startsWith('cancelled'),
-      legs: mine.map(driverLeg),
+      payment_hold: paymentBlocks(b, 'start'),
+      legs: mine.map((l) => ({ ...driverLeg(l), start_available_at: startAvailableAt(l) })),
     };
   }
 
@@ -113,6 +132,8 @@ export function bookingView(id, user) {
         (SELECT json_group_array(json_object('channel', channel, 'status', status, 'detail', detail)) FROM notification_deliveries d WHERE d.notification_id = n.id) AS deliveries
       FROM notifications n JOIN users u ON u.id = n.user_id WHERE n.booking_id = ? ORDER BY n.id DESC`, id)
       .map((n) => ({ ...n, deliveries: JSON.parse(n.deliveries || '[]') }));
+    view.payment_outstanding = paymentOutstanding(b);
+    view.payment_rule = setting('payment_rule');
     view.conflicts = legs.map((l) => ({ leg_id: l.id, items: findConflicts(l) }));
     view.invoice = get('SELECT i.id, i.number, i.status FROM invoice_items it JOIN invoices i ON i.id = it.invoice_id WHERE it.booking_id = ? AND i.status != \'void\'', id) || null;
     return view;

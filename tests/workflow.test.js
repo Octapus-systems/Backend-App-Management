@@ -28,7 +28,10 @@ before(async () => {
     assert.equal(r.status, 200, `login ${who}`);
     tokens[who] = r.body.token;
   }
+  // Legacy workflow tests run with the new Phase-1 rules relaxed; dedicated tests below switch them on.
+  await call('admin', 'PUT', '/admin/settings', { payment_rule: 'off', start_window_minutes: '0', min_notice_hours: '0' });
 });
+const setRules = (rules) => call('admin', 'PUT', '/admin/settings', rules);
 after(() => server.close());
 
 const future = (h) => new Date(Date.now() + h * 3600000).toISOString();
@@ -161,10 +164,14 @@ test('confirming without an accepted quote needs a reason', async () => {
   assert.equal(r.body.code, 'needs_override');
 });
 
-test('validation: airport needs flight number, hourly needs duration', async () => {
+test('validation: flight number optional unless configured; hourly needs duration', async () => {
   let r = await call('cust', 'POST', '/bookings', request({ journey_type: 'airport' }));
+  assert.equal(r.status, 201, 'flight number is optional by default');
+  await setRules({ flight_number_required: 'on' });
+  r = await call('cust', 'POST', '/bookings', request({ journey_type: 'airport' }));
   assert.equal(r.status, 400);
   assert.ok(r.body.fields.flight_number);
+  await setRules({ flight_number_required: 'off' });
   r = await call('cust', 'POST', '/bookings', request({ journey_type: 'hourly', duration_hours: '' }));
   assert.ok(r.body.fields.duration_hours);
 });
@@ -217,4 +224,84 @@ test('driver accepts or declines an assignment; everyone is told', async () => {
   r = await call('cust', 'GET', `/bookings/${id}`);
   assert.ok(r.body.legs[0].driver_accepted_at, 'customer sees chauffeur confirmed');
   assert.ok(get("SELECT 1 FROM notifications WHERE booking_id = ? AND event = 'driver_accepted'", id));
+});
+
+test('booking rules: minimum notice and minimum hourly hire are configurable; staff may override', async () => {
+  await setRules({ min_notice_hours: '2', hourly_min_hours: '2' });
+  let r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(1) }));
+  assert.equal(r.status, 400);
+  assert.ok(r.body.fields.pickup_at);
+  r = await call('cust', 'POST', '/bookings', request({ journey_type: 'hourly', duration_hours: 1, destination: '' }));
+  assert.ok(r.body.fields.duration_hours, 'below minimum hire');
+  r = await call('admin', 'POST', '/bookings', request({ pickup_at: future(1), customer_id: get("SELECT id FROM users WHERE email='customer@encore.test'").id }));
+  assert.equal(r.status, 201, 'staff can book short notice');
+  await setRules({ min_notice_hours: '0' });
+});
+
+test('payment rule blocks the journey until paid; pay-after is the management exception; start window enforced', async () => {
+  await setRules({ payment_rule: 'before_start', start_window_minutes: '30' });
+  let r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(0.25) }));
+  const id = r.body.id;
+  assert.equal(r.body.payment_arrangement, 'pay_before', 'pay before is the default');
+  r = await call('admin', 'POST', `/bookings/${id}/confirm`, { override_reason: 'phone' });
+  const leg = r.body.legs[0];
+  await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/assign`, { driver_id: get("SELECT id FROM users WHERE email='oliver@encore.test'").id, vehicle_id: get("SELECT id FROM vehicles WHERE status='available' ORDER BY id DESC LIMIT 1").id, override_reason: 'test' });
+  r = await call('oliver', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status: 'on_the_way' });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, 'payment_outstanding');
+  await call('admin', 'PATCH', `/bookings/${id}`, { payment_arrangement: 'pay_after' });
+  r = await call('oliver', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status: 'on_the_way' });
+  assert.equal(r.status, 200, 'exception allows the journey');
+
+  r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(5) }));
+  const id2 = r.body.id;
+  await call('admin', 'PATCH', `/bookings/${id2}`, { payment_arrangement: 'pay_after' });
+  r = await call('admin', 'POST', `/bookings/${id2}/confirm`, { override_reason: 'phone' });
+  await call('admin', 'POST', `/bookings/${id2}/legs/${r.body.legs[0].id}/assign`, { driver_id: get("SELECT id FROM users WHERE email='oliver@encore.test'").id, vehicle_id: get("SELECT id FROM vehicles WHERE status='available' ORDER BY id DESC LIMIT 1").id, override_reason: 'test' });
+  r = await call('oliver', 'POST', `/bookings/${id2}/legs/${r.body.legs[0].id}/status`, { status: 'on_the_way' });
+  assert.equal(r.body.code, 'too_early', 'cannot start more than 30 minutes before pickup');
+
+  await setRules({ payment_rule: 'before_assignment' });
+  r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(6) }));
+  r = await call('admin', 'POST', `/bookings/${r.body.id}/confirm`, { override_reason: 'phone' });
+  const a = await call('admin', 'POST', `/bookings/${r.body.id}/legs/${r.body.legs[0].id}/assign`, { driver_id: get("SELECT id FROM users WHERE email='james@encore.test'").id, vehicle_id: get("SELECT id FROM vehicles WHERE status='available' LIMIT 1").id });
+  assert.equal(a.body.code, 'payment_outstanding');
+  await setRules({ payment_rule: 'off', start_window_minutes: '0' });
+});
+
+test('mobile OTP: new customer signs up with name, returning customer signs straight in', async () => {
+  let r = await call(null, 'POST', '/auth/otp/request', { phone: '07700 900555' });
+  assert.equal(r.status, 200);
+  const code = r.body.demo_code;
+  assert.match(code, /^\d{6}$/);
+  r = await call(null, 'POST', '/auth/otp/verify', { phone: '+44 7700 900555', code: '000000' === code ? '111111' : '000000' });
+  assert.equal(r.status, 400, 'wrong code rejected');
+  r = await call(null, 'POST', '/auth/otp/verify', { phone: '+447700900555', code });
+  assert.equal(r.body.code, 'needs_name');
+  r = await call(null, 'POST', '/auth/otp/verify', { phone: '+447700900555', code, name: 'Guest Booker' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.user.role, 'customer');
+  assert.equal(r.body.user.email, null, 'placeholder email hidden');
+  r = await call(null, 'POST', '/auth/otp/verify', { phone: '+447700900555', code });
+  assert.equal(r.status, 400, 'code cannot be reused');
+
+  r = await call(null, 'POST', '/auth/otp/request', { phone: '07700900555' });
+  r = await call(null, 'POST', '/auth/otp/verify', { phone: '07700900555', code: r.body.demo_code });
+  assert.equal(r.body.user.name, 'Guest Booker', 'returning customer recognised by mobile');
+});
+
+test('temporary drivers: access ends on the set date and they are limited to their journeys', async () => {
+  const ends = new Date(Date.now() + 3 * 86400000).toISOString();
+  let r = await call('admin', 'POST', '/admin/drivers', { name: 'Temp Tom', email: 'temp@encore.test', phone: '+447700900777', password: 'TempPass123', driver_type: 'temporary', access_expires_at: ends });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.driver_type, 'temporary');
+  r = await call(null, 'POST', '/auth/login', { email: 'temp@encore.test', password: 'TempPass123', portal: 'app' });
+  assert.equal(r.status, 200);
+  const tok = r.body.token;
+  run("UPDATE users SET access_expires_at = datetime('now','-1 hour') WHERE email = 'temp@encore.test'");
+  r = await call(null, 'POST', '/auth/login', { email: 'temp@encore.test', password: 'TempPass123', portal: 'app' });
+  assert.equal(r.status, 403, 'expired temporary access blocked');
+  tokens.temp = tok;
+  r = await call('temp', 'GET', '/driver/legs');
+  assert.equal(r.status, 403, 'existing session also blocked');
 });

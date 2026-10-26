@@ -7,7 +7,7 @@ import {
 import {
   BOOKING_STATUSES, DELIVERY, JOURNEY_TYPES, LEG_FLOW, LEG_TIMESTAMP, PAYMENT_ARRANGEMENTS, PAYMENT_STATUSES,
   PRE_CONFIRMATION, TERMINAL, bookingView, customerMayCancel, deriveDeliveryStatus, findConflicts, legsFor,
-  loadBookingRow, nextRef, recomputePaymentStatus, scopeClause,
+  loadBookingRow, nextRef, paymentBlocks, recomputePaymentStatus, scopeClause, startAvailableAt,
 } from '../domain.js';
 
 const r = Router();
@@ -77,7 +77,7 @@ r.get('/', h((req, res) => {
 r.get('/:id', h((req, res) => res.json(bookingView(Number(req.params.id), req.user))));
 
 // ---------- create request (CUS-2) ----------
-function validateRequest(body) {
+function validateRequest(body, staff = false) {
   const errors = {};
   const type = body.journey_type;
   if (!JOURNEY_TYPES.includes(type)) errors.journey_type = 'Choose a journey type.';
@@ -86,12 +86,21 @@ function validateRequest(body) {
   const when = new Date(body.pickup_at);
   if (!body.pickup_at || Number.isNaN(when.getTime())) errors.pickup_at = 'Pickup date and time are required.';
   else if (when.getTime() < Date.now() - 5 * 60000) errors.pickup_at = 'Pickup time must be in the future.';
+  else if (!staff) {
+    // Customers must book at least N hours ahead (Settings → min_notice_hours). Staff may book short-notice exceptions.
+    const notice = Number(setting('min_notice_hours') || 0);
+    if (notice && when.getTime() < Date.now() + notice * 3600000) errors.pickup_at = `Please book at least ${notice} hour${notice === 1 ? '' : 's'} in advance, or call us for short-notice journeys.`;
+  }
   if (!body.lead_passenger?.trim()) errors.lead_passenger = 'Lead passenger name is required.';
   if (!body.contact_phone?.trim()) errors.contact_phone = 'Contact phone is required.';
   const pax = Number(body.passenger_count);
   if (!Number.isInteger(pax) || pax < 1 || pax > 60) errors.passenger_count = 'Enter the number of passengers.';
-  if (type === 'airport' && !body.flight_number?.trim()) errors.flight_number = 'Flight number is required for airport transfers.';
+  if (type === 'airport' && setting('flight_number_required') === 'on' && !body.flight_number?.trim()) errors.flight_number = 'Flight number is required for airport transfers.';
   if (type === 'hourly' && !(Number(body.duration_hours) > 0)) errors.duration_hours = 'Requested duration is required for hourly hire.';
+  else if (type === 'hourly' && !staff) {
+    const minHours = Number(setting('hourly_min_hours') || 0);
+    if (minHours && Number(body.duration_hours) < minHours) errors.duration_hours = `The minimum hire is ${minHours} hours.`;
+  }
   const isReturn = type === 'return' || !!body.is_return;
   if (isReturn) {
     const back = new Date(body.return_pickup_at);
@@ -109,7 +118,7 @@ r.post('/', h((req, res) => {
   const u = req.user;
   if (u.role === 'driver') throw forbidden('Drivers cannot create bookings.');
   const body = req.body || {};
-  const isReturn = validateRequest(body);
+  const isReturn = validateRequest(body, isAdmin(u));
 
   let customerId = u.id;
   let organisationId = u.role === 'corporate' ? u.organisation_id : null;
@@ -142,7 +151,7 @@ r.post('/', h((req, res) => {
       flight_number: body.flight_number || null,
       duration_hours: body.journey_type === 'hourly' ? Number(body.duration_hours) : null,
       is_return: isReturn,
-      payment_arrangement: organisationId ? 'corporate_account' : 'pay_after',
+      payment_arrangement: organisationId ? 'corporate_account' : (setting('default_payment_arrangement') || 'pay_before'),
       status: 'pending',
     });
     run('UPDATE bookings SET ref = ? WHERE id = ?', nextRef(bid), bid);
@@ -394,8 +403,8 @@ r.get('/:id/legs/:legId/options', adminOnly, h((req, res) => {
     if (b.preferred_category && v.category !== b.preferred_category) notes.push(`Customer preferred ${b.preferred_category}`);
     return { ...v, suitability: notes, assignable: v.status === 'available', conflicts: findConflicts(leg, null, v.id) };
   });
-  const drivers = all("SELECT id, name, phone, driver_availability FROM users WHERE role = 'driver' AND status = 'active' ORDER BY name")
-    .map((d) => ({ ...d, assignable: d.driver_availability === 'available', conflicts: findConflicts(leg, d.id, null) }));
+  const drivers = all("SELECT id, name, phone, driver_availability, driver_type, access_expires_at FROM users WHERE role = 'driver' AND status = 'active' ORDER BY driver_type, name")
+    .map((d) => ({ ...d, assignable: d.driver_availability === 'available' && !(d.access_expires_at && new Date(d.access_expires_at) < new Date(leg.pickup_at)), conflicts: findConflicts(leg, d.id, null) }));
   const operators = all('SELECT * FROM external_operators WHERE active = 1 ORDER BY name');
   res.json({ vehicles, drivers, operators });
 }));
@@ -406,6 +415,9 @@ r.post('/:id/legs/:legId/assign', adminOnly, h((req, res) => {
   const leg = get('SELECT * FROM booking_legs WHERE id = ? AND booking_id = ?', req.params.legId, b.id);
   if (!leg) throw bad('Unknown leg.');
   if (leg.status === 'completed') throw conflict('This leg is already completed.');
+  if (paymentBlocks(b, 'assignment')) {
+    throw conflict('Payment is outstanding for this pay-before booking. Record the payment, or change the payment arrangement to "pay after" to allow an exception.', { code: 'payment_outstanding' });
+  }
   const { driver_id, vehicle_id, external_operator_id, external_vehicle_reg, external_driver_name } = req.body;
   const override = String(req.body.override_reason || '').trim();
   let patch;
@@ -420,6 +432,7 @@ r.post('/:id/legs/:legId/assign', adminOnly, h((req, res) => {
     if (!driver || !vehicle) throw bad('Choose both a driver and a vehicle.');
     if (vehicle.status !== 'available') throw conflict(`Vehicle ${vehicle.registration} is ${vehicle.status} and cannot be assigned.`);
     if (driver.driver_availability !== 'available') throw conflict(`${driver.name} is marked unavailable.`);
+    if (driver.access_expires_at && new Date(driver.access_expires_at) < new Date(leg.pickup_at)) throw conflict(`${driver.name}'s temporary access ends before this pickup. Extend it first.`);
     const clashes = findConflicts(leg, driver.id, vehicle.id);
     if (clashes.length && !override) {
       throw conflict('This assignment overlaps another confirmed journey.', { code: 'assignment_conflict', conflicts: clashes });
@@ -521,6 +534,14 @@ r.post('/:id/legs/:legId/status', h((req, res) => {
 
   // Duplicate press: state already reached — report the truth, change nothing.
   if (leg.status === target) return res.json({ unchanged: true, booking: bookingView(b.id, u) });
+
+  if (!adminOverride && leg.status === 'assigned' && target === 'on_the_way') {
+    if (paymentBlocks(b, 'start')) throw conflict('Payment for this journey is still outstanding. Please contact the dispatcher before setting off.', { code: 'payment_outstanding' });
+    const opensAt = startAvailableAt(leg);
+    if (opensAt && Date.now() < new Date(opensAt).getTime()) {
+      throw conflict(`You can start this journey from ${fmtWhen(opensAt)} (${setting('start_window_minutes')} minutes before pickup).`, { code: 'too_early', opens_at: opensAt });
+    }
+  }
 
   const from = LEG_FLOW.indexOf(leg.status);
   const to = LEG_FLOW.indexOf(target);

@@ -96,29 +96,34 @@ r.patch('/vehicles/:id', h((req, res) => {
 
 // ---------- drivers (ADM-3) ----------
 r.get('/drivers', h((_req, res) => {
-  res.json(all(`SELECT id, name, email, phone, status, driver_availability, licence_number, notes, created_at,
+  res.json(all(`SELECT id, name, email, phone, status, driver_availability, licence_number, notes, created_at, driver_type, access_expires_at,
     (SELECT COUNT(*) FROM booking_legs l WHERE l.driver_id = users.id AND l.status IN ('assigned','on_the_way','arrived','started')) AS upcoming_jobs
     FROM users WHERE role = 'driver' ORDER BY status, name`));
 }));
 r.post('/drivers', h((req, res) => {
   const { name, email, phone, password, licence_number, notes } = req.body;
+  const temporary = req.body.driver_type === 'temporary';
   const f = {};
+  if (temporary && (!req.body.access_expires_at || Number.isNaN(new Date(req.body.access_expires_at).getTime()) || new Date(req.body.access_expires_at) < new Date())) f.access_expires_at = 'Choose when this temporary access ends.';
   if (!name?.trim()) f.name = 'Name is required.';
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || '')) f.email = 'Valid email is required.';
   if (!phone?.trim()) f.phone = 'Phone is required.';
   if (!password || password.length < 8) f.password = 'Temporary password of at least 8 characters.';
   if (Object.keys(f).length) throw bad('Please check the driver details.', { fields: f });
   const max = Number(setting('max_drivers') || 0);
-  if (max && get("SELECT COUNT(*) AS n FROM users WHERE role='driver' AND status='active'").n >= max) throw conflict(`Your plan allows ${max} active drivers. Suspend a driver first.`);
+  if (!temporary && max && get("SELECT COUNT(*) AS n FROM users WHERE role='driver' AND status='active' AND driver_type = 'regular'").n >= max) throw conflict(`Your plan allows ${max} active drivers. Suspend a driver first.`);
   if (get('SELECT 1 FROM users WHERE email = ?', email)) throw conflict('That email is already in use.');
-  const id = insert('users', { name: name.trim(), email: email.trim(), phone: phone.trim(), password_hash: hashPassword(password), role: 'driver', status: 'active', licence_number: licence_number || null, notes: notes || null });
-  audit({ entity: 'user', entityId: id, action: 'driver_added', detail: { name, email }, actorId: req.user.id });
+  const id = insert('users', { name: name.trim(), email: email.trim(), phone: phone.trim(), password_hash: hashPassword(password), role: 'driver', status: 'active', licence_number: licence_number || null, notes: notes || null,
+    driver_type: temporary ? 'temporary' : 'regular', access_expires_at: temporary ? new Date(req.body.access_expires_at).toISOString() : null });
+  audit({ entity: 'user', entityId: id, action: temporary ? 'temporary_driver_added' : 'driver_added', detail: { name, email, ...(temporary ? { access_expires_at: req.body.access_expires_at } : {}) }, actorId: req.user.id });
   res.status(201).json(publicUser(get('SELECT * FROM users WHERE id = ?', id)));
 }));
 r.patch('/drivers/:id', h((req, res) => {
   const d = get("SELECT * FROM users WHERE id = ? AND role = 'driver'", req.params.id);
   if (!d) throw notFound();
-  const data = pick(req.body, ['name', 'phone', 'licence_number', 'notes', 'driver_availability', 'status']);
+  const data = pick(req.body, ['name', 'phone', 'licence_number', 'notes', 'driver_availability', 'status', 'access_expires_at']);
+  if (data.access_expires_at !== undefined && d.driver_type !== 'temporary') delete data.access_expires_at;
+  if (data.access_expires_at) data.access_expires_at = new Date(data.access_expires_at).toISOString();
   if (data.driver_availability && !['available', 'unavailable'].includes(data.driver_availability)) throw bad('Unknown availability.');
   if (data.status && !['active', 'suspended'].includes(data.status)) throw bad('Unknown status.');
   if (req.body.password) {
@@ -336,7 +341,11 @@ r.put('/settings', h((req, res) => {
       if (!allowed.has(k)) continue;
       const val = typeof v === 'string' ? v : JSON.stringify(v);
       if (k === 'admission_mode' && !['invitation', 'approval', 'both'].includes(val)) throw bad('Unknown admission mode.');
-      if (['default_job_minutes', 'turnaround_minutes', 'quote_validity_hours', 'reminder_minutes_before', 'invoice_due_days', 'max_drivers', 'max_admins'].includes(k) && !(Number(val) >= 0)) throw bad(`${k} must be a number.`);
+      if (['default_job_minutes', 'turnaround_minutes', 'quote_validity_hours', 'reminder_minutes_before', 'invoice_due_days', 'max_drivers', 'max_admins', 'min_notice_hours', 'hourly_min_hours', 'start_window_minutes'].includes(k) && !(Number(val) >= 0)) throw bad(`${k} must be a number.`);
+      if (k === 'payment_rule' && !['off', 'before_assignment', 'before_start'].includes(val)) throw bad('Unknown payment rule.');
+      if (k === 'default_payment_arrangement' && !['pay_before', 'pay_after'].includes(val)) throw bad('Unknown payment arrangement.');
+      if (['flight_number_required', 'guest_booking', 'otp_login'].includes(k) && !['on', 'off'].includes(val)) throw bad(`${k} must be on or off.`);
+      if (k === 'otp_channel' && !['sms', 'whatsapp'].includes(val)) throw bad('Unknown OTP channel.');
       if (setting(k) !== val) changes[k] = { from: setting(k), to: val };
       run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', k, val);
     }

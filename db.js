@@ -266,7 +266,38 @@ export const DEFAULT_SETTINGS = {
   channel_email: 'off',
   max_drivers: '10',
   max_admins: '5',
+  // ---- booking rules (admin-configurable) ----
+  min_notice_hours: '2',
+  hourly_min_hours: '2',
+  flight_number_required: 'off',
+  booking_fields: JSON.stringify({ stops: true, passenger_names: true, luggage: true, child_seats: true, accessibility_needs: true, special_instructions: true, sensitive_notes: true, preferred_category: true, flight_number: true }),
+  // ---- payment rules ----
+  default_payment_arrangement: 'pay_before',
+  payment_rule: 'before_start',
+  // ---- journey ----
+  start_window_minutes: '30',
+  // ---- sign-in ----
+  guest_booking: 'on',
+  otp_login: 'on',
+  otp_channel: 'sms',
 };
+
+// Later additions to existing tables (safe to re-run).
+for (const sql of [
+  "ALTER TABLE users ADD COLUMN driver_type TEXT NOT NULL DEFAULT 'regular'",
+  'ALTER TABLE users ADD COLUMN access_expires_at TEXT',
+]) {
+  try { db.exec(sql); } catch { /* column already exists */ }
+}
+db.exec(`CREATE TABLE IF NOT EXISTS otp_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
 
 for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run(key, value);

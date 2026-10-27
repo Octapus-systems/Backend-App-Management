@@ -108,3 +108,40 @@ export async function suggestPlaces(input, sessionToken) {
   if (placeCache.size > 2000) placeCache.delete(placeCache.keys().next().value);
   return value;
 }
+
+/** Turn the customer's GPS position into a readable pickup address (Geocoding API, Places fallback). */
+export async function reverseGeocode(lat, lng) {
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) throw new Error('Google Maps API key not configured');
+  const la = Number(lat); const ln = Number(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln) || Math.abs(la) > 90 || Math.abs(ln) > 180) throw new Error('Invalid coordinates');
+  const ck = `rev:${la.toFixed(4)},${ln.toFixed(4)}`;
+  const hit = placeCache.get(ck);
+  if (hit && Date.now() - hit.at < TTL) return hit.value;
+  let value = null;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${la},${ln}&language=en-GB&key=${key}`;
+    const data = await (await fetch(url, { signal: AbortSignal.timeout(8000) })).json();
+    const best = (data.results || []).find((r) => !r.types?.includes('plus_code'));
+    if (data.status === 'OK' && best) {
+      const short = best.formatted_address.replace(/, UK$/, '');
+      const [main, ...rest] = short.split(', ');
+      value = { text: short, main, secondary: rest.join(', ') };
+    }
+  } catch { /* fall back to Places */ }
+  if (!value) {
+    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': 'places.formattedAddress,places.displayName' },
+      body: JSON.stringify({ maxResultCount: 1, rankPreference: 'DISTANCE', languageCode: 'en-GB', locationRestriction: { circle: { center: { latitude: la, longitude: ln }, radius: 150 } } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json().catch(() => ({}));
+    const p = data.places?.[0];
+    if (!res.ok || !p) throw new Error(data?.error?.message || 'No address found here');
+    const text = p.formattedAddress.replace(/, UK$/, '');
+    value = { text, main: p.displayName?.text || text.split(', ')[0], secondary: text };
+  }
+  placeCache.set(ck, { at: Date.now(), value });
+  return value;
+}

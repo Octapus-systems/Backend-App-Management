@@ -6,7 +6,7 @@ import bookingRoutes from './routes/bookings.js';
 import adminRoutes from './routes/admin.js';
 import driverRoutes from './routes/driver.js';
 import { HttpError, authenticate, h, requireRole } from './lib.js';
-import { mapsEnabled, suggestPlaces } from './maps.js';
+import { mapsEnabled, suggestPlaces, reverseGeocode } from './maps.js';
 
 export function createApp() {
   const app = express();
@@ -35,14 +35,26 @@ export function createApp() {
   app.use('/api/auth', authRoutes);
   app.use('/api/bookings', authenticate, bookingRoutes);
   app.use('/api/account', authenticate, account);
-  // Address suggestions for signed-in users. Key never leaves the server.
+  // Address suggestions and "use my location". Open to guests booking without an account,
+  // rate-limited per user (or per IP for guests). The Google key never leaves the server.
   const recent = new Map();
-  app.get('/api/places', authenticate, h(async (req, res) => {
-    if (!mapsEnabled()) return res.json([]);
-    const now = Date.now(); const k = req.user.id; const hits = (recent.get(k) || []).filter((t) => now - t < 60000);
-    if (hits.length > 120) throw new HttpError(429, 'Too many lookups — please slow down.');
+  const limit = (req) => {
+    const signedIn = (req.headers.authorization || '').startsWith('Bearer ');
+    const k = signedIn ? `u:${req.headers.authorization.slice(-24)}` : `ip:${req.ip}`;
+    const now = Date.now(); const hits = (recent.get(k) || []).filter((t) => now - t < 60000);
+    if (hits.length > (signedIn ? 120 : 40)) throw new HttpError(429, 'Too many lookups — please slow down.');
     recent.set(k, [...hits, now]);
+    if (recent.size > 5000) recent.delete(recent.keys().next().value);
+  };
+  app.get('/api/places', h(async (req, res) => {
+    if (!mapsEnabled()) return res.json([]);
+    limit(req);
     try { res.json(await suggestPlaces(req.query.q, req.query.session)); } catch (e) { console.error('[places]', e.message); res.json([]); }
+  }));
+  app.get('/api/places/reverse', h(async (req, res) => {
+    if (!mapsEnabled()) throw new HttpError(503, 'Location lookup is not available.');
+    limit(req);
+    try { res.json(await reverseGeocode(req.query.lat, req.query.lng)); } catch (e) { console.error('[reverse]', e.message); throw new HttpError(404, 'We could not find an address for your location. Please type your pickup.'); }
   }));
   app.use('/api/driver', authenticate, requireRole('driver'), driverRoutes);
   app.use('/api/admin', authenticate, requireRole('admin'), adminRoutes);

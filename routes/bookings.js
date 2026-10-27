@@ -177,7 +177,7 @@ r.post('/', h((req, res) => {
   notify(customerId, {
     bookingId: id, event: 'request_received', email: true,
     title: `Request received · ${ref}`,
-    body: 'Thank you. Encore Executive is reviewing your journey request. This is not yet a confirmed booking — we will send you a tailored quotation shortly.',
+    body: 'Thank you for choosing Encore! A member of our team will review your journey details and provide a personalised quotation — please allow up to 24 hours during busier periods. Your booking is not yet confirmed.',
   });
   notifyAdmins({ bookingId: id, event: 'new_request', title: `New request ${ref}`, body: `${body.lead_passenger} · ${fmtWhen(body.pickup_at)} · ${body.pickup} → ${body.destination || 'As directed'}` });
   // Distance / drive time from Google Routes (best effort, does not block the request).

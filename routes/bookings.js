@@ -551,14 +551,28 @@ r.post('/:id/legs/:legId/status', h((req, res) => {
   const reason = String(req.body.reason || '').trim();
   if (adminOverride && to < from && !reason) throw bad('Give a reason when moving a status backwards.');
 
+  // Journey Distance Exceeded (feature 3): the driver records the actual distance driven
+  // when completing the journey. Miles are converted to metres to compare against the
+  // accepted route distance already stored on the leg (from Google Routes at confirm time).
+  let actualDistanceM = null;
+  if (target === 'completed') {
+    const miles = req.body.actual_distance_mi;
+    if (miles != null && miles !== '') {
+      const n = Number(miles);
+      if (!Number.isFinite(n) || n < 0 || n > 2000) throw bad('Enter the actual distance driven, in miles.', { fields: { actual_distance_mi: 'Enter a valid distance in miles.' } });
+      actualDistanceM = Math.round(n * 1609.344);
+    }
+  }
+
   tx(() => {
     const patch = { status: target };
     if (!leg.driver_accepted_at && to > from) patch.driver_accepted_at = new Date().toISOString();
     if (LEG_TIMESTAMP[target]) patch[LEG_TIMESTAMP[target]] = new Date().toISOString();
+    if (actualDistanceM != null) patch.actual_distance_m = actualDistanceM;
     // When moving backwards, clear later timestamps so history stays truthful.
     for (const s of LEG_FLOW.slice(to + 1)) if (LEG_TIMESTAMP[s]) patch[LEG_TIMESTAMP[s]] = null;
     update('booking_legs', leg.id, patch);
-    audit({ bookingId: b.id, entity: 'leg', entityId: leg.id, action: adminOverride ? 'status_override' : 'status_update', detail: { leg: leg.label, from: leg.status, to: target, reason: reason || null }, actorId: u.id });
+    audit({ bookingId: b.id, entity: 'leg', entityId: leg.id, action: adminOverride ? 'status_override' : 'status_update', detail: { leg: leg.label, from: leg.status, to: target, reason: reason || null, actual_distance_m: actualDistanceM }, actorId: u.id });
     deriveDeliveryStatus(b.id);
   });
 
@@ -567,9 +581,25 @@ r.post('/:id/legs/:legId/status', h((req, res) => {
     const fresh = legsFor(b.id).find((l) => l.id === leg.id);
     notify(b.customer_id, { bookingId: b.id, event: msg[0], title: `${msg[1]} · ${b.ref}`, body: msg[2](fresh) });
     if (!adminOverride) notifyAdmins({ bookingId: b.id, event: msg[0], title: `${b.ref} · ${target.replace(/_/g, ' ')}`, body: `${fresh.driver_name || 'Chauffeur'} — ${fresh.label}.` });
+    if (target === 'completed') checkDistanceExceeded(b, fresh);
   }
   res.json({ unchanged: false, booking: bookingView(b.id, u) });
 }));
+
+/** Notify the admin once if a completed journey's actual distance exceeds its accepted distance. */
+function checkDistanceExceeded(b, leg) {
+  if (leg.distance_exceeded_notified_at) return;
+  if (leg.actual_distance_m == null || leg.distance_m == null) return;
+  if (leg.actual_distance_m <= leg.distance_m) return;
+  const extraMi = (leg.actual_distance_m - leg.distance_m) / 1609.344;
+  update('booking_legs', leg.id, { distance_exceeded_notified_at: new Date().toISOString() });
+  notifyAdmins({
+    bookingId: b.id, event: 'journey_distance_exceeded',
+    title: `Journey Distance Exceeded · ${b.ref}`,
+    body: `${leg.label}: accepted ${(leg.distance_m / 1609.344).toFixed(1)} mi, actual ${(leg.actual_distance_m / 1609.344).toFixed(1)} mi — ${extraMi.toFixed(1)} mi over.`,
+  });
+  audit({ bookingId: b.id, entity: 'leg', entityId: leg.id, action: 'distance_exceeded_alert', detail: { accepted_m: leg.distance_m, actual_m: leg.actual_distance_m, extra_m: leg.actual_distance_m - leg.distance_m } });
+}
 
 // ---------- cancellation (CUS-4) ----------
 r.post('/:id/cancel', h((req, res) => {

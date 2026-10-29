@@ -4,7 +4,7 @@ import { all, db, get, run, setting } from './db.js';
 // Results are informational (pricing factor "distance from base", conflict timing) —
 // they never produce a customer price automatically (BRD: no per-mile fares).
 
-for (const col of ['distance_m INTEGER', 'duration_s INTEGER', 'base_distance_m INTEGER', 'base_duration_s INTEGER', 'route_checked_at TEXT', 'route_error TEXT', 'driver_accepted_at TEXT']) {
+for (const col of ['distance_m INTEGER', 'duration_s INTEGER', 'base_distance_m INTEGER', 'base_duration_s INTEGER', 'route_checked_at TEXT', 'route_error TEXT', 'driver_accepted_at TEXT', 'actual_distance_m INTEGER', 'distance_exceeded_notified_at TEXT']) {
   try { db.exec(`ALTER TABLE booking_legs ADD COLUMN ${col}`); } catch { /* already exists */ }
 }
 

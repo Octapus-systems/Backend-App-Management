@@ -305,3 +305,47 @@ test('temporary drivers: access ends on the set date and they are limited to the
   r = await call('temp', 'GET', '/driver/legs');
   assert.equal(r.status, 403, 'existing session also blocked');
 });
+
+test('journey distance exceeded: admin is alerted once when actual distance exceeds the accepted distance', async () => {
+  let r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(3) }));
+  const id = r.body.id;
+  r = await call('admin', 'POST', `/bookings/${id}/confirm`, { override_reason: 'phone' });
+  const leg = r.body.legs[0];
+  const assign = { driver_id: get("SELECT id FROM users WHERE email='oliver@encore.test'").id, vehicle_id: get("SELECT id FROM vehicles WHERE status='available' ORDER BY id DESC LIMIT 1").id };
+  await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/assign`, { ...assign, override_reason: 'test' });
+  run('UPDATE booking_legs SET distance_m = ? WHERE id = ?', 64374, leg.id); // 40 miles accepted
+
+  for (const status of ['on_the_way', 'arrived', 'started']) {
+    r = await call('oliver', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status });
+    assert.equal(r.status, 200, status);
+  }
+  r = await call('oliver', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status: 'completed', actual_distance_mi: 43 });
+  assert.equal(r.status, 200);
+  assert.ok(r.body.booking.legs[0].distance_exceeded, 'customer-visible flag set');
+
+  const alert = get("SELECT * FROM notifications WHERE booking_id = ? AND event = 'journey_distance_exceeded'", id);
+  assert.ok(alert, 'admin was notified');
+  assert.match(alert.title, /Journey Distance Exceeded/);
+  assert.match(alert.body, /43\.0 mi/);
+  assert.match(alert.body, /3\.0 mi over/);
+
+  // Re-completing (e.g. an admin override) must not send a second alert.
+  const before = get("SELECT COUNT(*) AS n FROM notifications WHERE booking_id = ? AND event = 'journey_distance_exceeded'", id).n;
+  await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status: 'arrived', reason: 'correction' });
+  await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status: 'completed', actual_distance_mi: 45 });
+  const after = get("SELECT COUNT(*) AS n FROM notifications WHERE booking_id = ? AND event = 'journey_distance_exceeded'", id).n;
+  assert.equal(after, before, 'alert does not repeat for the same completed journey');
+});
+
+test('journey distance within accepted distance: no alert', async () => {
+  let r = await call('cust', 'POST', '/bookings', request({ pickup_at: future(3) }));
+  const id = r.body.id;
+  r = await call('admin', 'POST', `/bookings/${id}/confirm`, { override_reason: 'phone' });
+  const leg = r.body.legs[0];
+  await call('admin', 'POST', `/bookings/${id}/legs/${leg.id}/assign`, { driver_id: get("SELECT id FROM users WHERE email='james@encore.test'").id, vehicle_id: get("SELECT id FROM vehicles WHERE status='available' LIMIT 1").id, override_reason: 'test' });
+  run('UPDATE booking_legs SET distance_m = ? WHERE id = ?', 64374, leg.id);
+  for (const status of ['on_the_way', 'arrived', 'started']) await call('james', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status });
+  r = await call('james', 'POST', `/bookings/${id}/legs/${leg.id}/status`, { status: 'completed', actual_distance_mi: 38 });
+  assert.equal(r.body.booking.legs[0].distance_exceeded, false);
+  assert.ok(!get("SELECT 1 FROM notifications WHERE booking_id = ? AND event = 'journey_distance_exceeded'", id));
+});

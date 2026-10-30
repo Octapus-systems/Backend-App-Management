@@ -94,7 +94,7 @@ function validateRequest(body, staff = false) {
   if (!body.lead_passenger?.trim()) errors.lead_passenger = 'Lead passenger name is required.';
   if (!body.contact_phone?.trim()) errors.contact_phone = 'Contact phone is required.';
   const pax = Number(body.passenger_count);
-  if (!Number.isInteger(pax) || pax < 1 || pax > 60) errors.passenger_count = 'Enter the number of passengers.';
+  if (!Number.isInteger(pax) || pax < 1 || pax > 12) errors.passenger_count = 'Enter the number of passengers (up to 12 — call us for larger groups).';
   if (type === 'airport' && setting('flight_number_required') === 'on' && !body.flight_number?.trim()) errors.flight_number = 'Flight number is required for airport transfers.';
   if (type === 'hourly' && !(Number(body.duration_hours) > 0)) errors.duration_hours = 'Requested duration is required for hourly hire.';
   else if (type === 'hourly' && !staff) {
@@ -107,9 +107,10 @@ function validateRequest(body, staff = false) {
     if (!body.return_pickup_at || Number.isNaN(back.getTime())) errors.return_pickup_at = 'Return pickup time is required.';
     else if (!errors.pickup_at && back <= when) errors.return_pickup_at = 'Return pickup must be after the outbound pickup.';
   }
-  for (const k of ['luggage_large', 'luggage_small', 'child_seats']) {
-    if (body[k] != null && (!Number.isInteger(Number(body[k])) || Number(body[k]) < 0)) errors[k] = 'Enter a valid number.';
+  for (const k of ['luggage_large', 'luggage_small']) {
+    if (body[k] != null && (!Number.isInteger(Number(body[k])) || Number(body[k]) < 0 || Number(body[k]) > 12)) errors[k] = 'Enter a number from 0 to 12.';
   }
+  if (body.child_seats != null && (!Number.isInteger(Number(body.child_seats)) || Number(body.child_seats) < 0 || Number(body.child_seats) > 4)) errors.child_seats = 'Enter a valid number.';
   if (Object.keys(errors).length) throw bad('Please complete the highlighted fields.', { fields: errors });
   return isReturn;
 }
